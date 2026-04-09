@@ -1090,6 +1090,292 @@ vless://uuid@mysite.com:443?encryption=none&security=tls&type=ws&path=/search&ho
 
 Настроить промежуточный VPS с L4 проксированием по iptables/HAProxy на CF можно аналогично уже описанному процессу.
 
+Upd:
+Добавлю рабочие конфиги xhttp + ws на nginx с self-steal.
+
+* При включенном оранжевом облаке (CF->DNS->Records) - vps1 -> cf -> vps2 nginx -> xray
+* При выключенном (рекомендую по умолчанию) - vps1 -> vps2 nginx -> xray
+
+Таким образом можно по необходимости "подрубать" CF
+
+nginx
+```shell
+server {
+    server_name   my-site.com www.my-site.com;
+
+    listen 443 ssl http2; # managed by Certbot
+
+    ssl_certificate /etc/letsencrypt/live/my-site.com-0001/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/my-site.com-0001/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+    # Legit site backend
+    location / {
+        proxy_pass         http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection keep-alive;
+        proxy_set_header   Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    # vless ws
+    location /search {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:20000;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # vless xhttp
+    location /download {
+        client_max_body_size 0;
+        grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_body_timeout 5m;
+        grpc_read_timeout 315;
+        grpc_send_timeout 5m;
+        grpc_pass unix:/dev/shm/xrxh.socket;
+    }
+
+
+
+}
+server {
+    if ($host = www.my-site.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    if ($host = my-site.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen        80;
+    server_name   my-site.com www.my-site.com;
+    return 404; # managed by Certbot
+
+}
+```
+
+Xray-core server
+```shell
+{
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 20000,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "uuid-ws" // replace
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/search" // replace
+        }
+      }
+    },
+    {
+      "listen": "/dev/shm/xrxh.socket,0666",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "uuid-xhttp" // replace
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "mode": "stream-one",
+          "path": "/download" // replace
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ]
+}
+```
+
+Xray-core client (openWRT)
+```shell
+{
+  "log": {
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log",
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "tag": "tproxy-in",
+      "protocol": "dokodemo-door",
+      "listen": "::",
+      "port": 4444,
+      "settings": {
+        "network": "tcp,udp",
+        "followRedirect": true
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "tag": "test-socks",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "gavno-ws",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "vps1-ip-addr", // replace
+            "port": 443,
+            "users": [
+              {
+                "id": "uuid-ws", // replace
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "wsSettings": {
+          "path": "/search" // replace
+        },
+        "tlsSettings": {
+          "allowInsecure": false,
+          "serverName": "my-site.com", // replace
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "tag": "gavno-xhttp",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "vps1-ip-addr", // replace
+            "port": 443,
+            "users": [
+              {
+                "id": "uuid-xhttp", // replace
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/download", // replace
+          "mode": "stream-one"
+        },
+        "security": "tls",
+        "tlsSettings": {
+          "allowInsecure": false,
+          "serverName": "my-site.com", // replace
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": "test-socks", // все с socks инбаунда на ws
+        "outboundTag": "gavno-ws"
+      },
+      {
+        "inboundTag": "tproxy-in", // все с tproxy инбаунда на xhttp
+        "outboundTag": "gavno-xhttp"
+      }
+    ]
+  }
+}
+```
+
+RU vps haproxy
+```shell
+defaults
+        log     global
+        mode    tcp # L4 проксирование
+        option  tcplog
+        option  dontlognull
+        timeout connect 5000 # таймаут на установку соединения с бекенд хостами, мс
+        timeout client  50000 # таймаут ожидания следующих данных от клиента
+        timeout server  50000 # таймаут ожидания данных от сервера
+
+frontend vless-in
+    bind *:443
+    default_backend vless-single-node
+
+backend vless-single-node
+    mode tcp
+    server vps_eu my-site.com:443 check inter 10s fall 3 rise 2
+```
+
 ## Полезные ссылки
 * Примеры конфигов xray-core (github.com) - https://github.com/XTLS/Xray-examples
 * Документация xray-core (github.io) - https://xtls.github.io/ru/
