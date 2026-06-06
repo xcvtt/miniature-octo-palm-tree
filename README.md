@@ -18,6 +18,7 @@
 [4/5 Split-Tunneling](#45-client-split-tunneling-on-router-openwrt) ·
 [5/5 CDN](#55-cdn-client---ruvps---cdn---euvps---warp)
 
+##### [Обновления](#обновления-1)
 ##### [Ссылки](#полезные-ссылки)
 
 ---
@@ -1375,6 +1376,23 @@ backend vless-single-node
     mode tcp
     server vps_eu my-site.com:443 check inter 10s fall 3 rise 2
 ```
+
+## Обновления
+### 07.06.2026
+На некоторых клиентах судя по всему начали детектить фингерпринт chrome, помогает смена на firefox
+
+Нашел интересную утилиту на бекап, пока лежал xray - https://github.com/sshuttle/sshuttle
+
+Прокладывает туннель через ssh, проверял только на linux клиенте
+
+```shell
+# туннелит все пакеты кроме локальных и к VPS
+sshuttle -v --disable-ipv6 -r user@vps-ip -x vps-ip/32 -x 192.168.0.0/16 0/0
+
+# либо если vps сохранен в config под названием vps
+sshuttle -v --disable-ipv6 -r vps -x vps-ip/32 -x 192.168.0.0/16 0/0
+```
+
 
 ## Полезные ссылки
 * Примеры конфигов xray-core (github.com) - https://github.com/XTLS/Xray-examples
